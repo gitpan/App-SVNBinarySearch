@@ -1,0 +1,279 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+=head1 NAME
+
+svn_binary_seach
+
+=head1 VERSION
+
+0.01
+
+=head1 SYNOPSIS
+
+ svn_binary_search -r rev:rev -c test_script [-n test_name] [-d outdir] [-q]
+
+=head1 DESCRIPTION
+
+Need to know when a feature was added to a project in your svn repository?
+When a regression test started failing? Write up a small script
+that tests your feature or failure, feed in a begin/end revision, and
+this script will run a binary search through those svn revisions in 
+a checked-out working copy determine which revision changed the behavior.
+
+=head1 OPTIONS
+
+=over 4
+
+=item -r
+
+Required. Specify a colon separated pair of revision numbers that inclusively 
+bound your search.
+
+=item -c
+
+Required. Executable that will generate output to test your condition on 
+various svn revisions of your project. L<EXAMPLES>.
+
+=item -n
+
+Optional. Override the default file name (revision_) for generated files
+
+=item -d
+
+Optional. Override the default temp directory for generated files.
+
+=item -q
+
+Optional. Run quietly, surpressing output from svn up commands.
+
+=back
+
+=head1 EXAMPLES
+
+Before you begin, you must have a working copy of your repository checked out
+locally. C<svn> must be in your path. It is recommended that you have
+a pristine copy checked out, with no local modifications.
+
+The most important part of this tool is the test script that you provide. The
+script must generate all output to be compared to C<STDOUT>. Any information
+sent to C<STDERR> will be preserved in a log so you can further track down any
+build issues, etc.
+
+A sample (sh) test script:
+
+  make clean 1>&2
+  sh configure 1>&2
+  make 1>&2
+  prove t/some_test.t 1>&2
+  echo $?
+
+Note that all but the last step redirect all their output to C<STDERR>,
+including the run of the test itself: The only result that we care about is
+whether the test passed or not. While it would be tempting to just dump the
+output from C<prove> and compare it, C<prove> generates timing information 
+which might change from run to run. The entirety of the text sent to C<STDOUT>
+is used to compare the results, so construct your test carefully.
+
+You can then run this with:
+
+ svn_binary_search -r 920:967 -c your_script
+
+As it runs, you'll see the output from the C<svn up> commands,
+followed by, e.g:
+
+ *** changed between r951 and r952
+
+As it runs, output will be placed in a temporary directory (overridable on the
+command line with C<-d>). Output will end up in files like:
+
+ revision_920.log
+ revision_920.out
+
+Where the test name (which defaults to "revision", but can be
+overriden by the C<-n> option) and the svn version
+number form the base name, and the extension is either C<.log> (from C<STDERR>)
+or C<.out> (from C<STDOUT>).
+
+=head1 AUTHOR
+
+Will Coleda, <coke at cpan.org>
+
+=cut
+
+use subs qw {slurp};
+
+use File::Spec;
+use Getopt::Long;
+use Iterator;
+
+# Get command line options
+my $usage = <<"END_USAGE";
+  $0
+    -r rev:rev -c test_script [-n test_name] [-d outdir]
+END_USAGE
+
+my $versions;
+my $test_script;
+my $test_name = "revision";
+my $test_dir;
+my $quiet;
+
+my $options = GetOptions(
+    "-r=s" => \$versions,
+    "-c=s" => \$test_script,
+    "-n=s" => \$test_name,
+    "-d=s" => \$test_dir,
+    "-q"   => \$quiet,
+    )
+    or die $usage;
+
+# Validate command line options
+
+my ( $low_rev, $high_rev );   # actual version numbers split from command line
+my $verbose = 1;
+
+if ( defined($versions) and $versions =~ /(\d+):(\d+)/ ) {
+    $low_rev  = $1;
+    $high_rev = $2;
+    die "initial revision must be at least two less than ending revision"
+        unless ( $high_rev - $low_rev >= 2 );
+}
+else {
+    die "Must specify two integer version numbers with -r:\n$usage";
+}
+
+if ( !defined($test_dir) ) {
+    $test_dir = File::Spec->tmpdir();
+}
+
+if ( !defined($test_script) ) {
+    die "You must specify a test script to run.\n$usage";
+}
+
+if ( defined($quiet) ) {
+    $verbose = 0;
+}
+
+warn "Results will be stored in $test_dir\n";
+
+#XXX Make this configurable to allow cvs or non-path'd versions of svn
+my $svn_up = "svn up -r";
+
+# Keep track of which revisions...
+my $current_rev;    # ... we're testing right now
+my ( $highest_low, $lowest_high ) =  # ...are at the edge of our current range
+    ( $low_rev, $high_rev );
+
+# Create an Iterator that will return the next svn version we need
+# to work on.
+
+my $iter;
+{
+
+    my $count =
+        0;    # used to determine if we're just doing the initial edge cases
+
+    $iter = Iterator->new(
+        sub {
+
+            $count++;
+
+            # Are we done yet?
+            if ( $lowest_high == $highest_low + 1 ) {
+                Iterator::is_done();
+            }
+
+            # First two values are always low, then high.
+            if ( $count == 1 ) {
+                return $low_rev;
+            }
+            elsif ( $count == 2 ) {
+                return $high_rev;
+            }
+
+            # This is followed by a binary search...
+            return int( ( $highest_low + $lowest_high ) / 2 );
+        }
+    );
+}
+
+# The output for the edge cases. Use this to determine how to split
+# the binary search
+
+my ( $low_output, $high_output );
+
+# Loop until we run out of versions to check.
+
+while (1) {
+    eval { $current_rev = $iter->value(); };
+
+    if ($@) {
+
+       # XXX: should verify this actually occurred. It's possible the behavior
+       # never actually changed!
+        print "test case changed between r$highest_low and r$lowest_high\n";
+        exit 0;
+    }
+
+    # Get the latest version #XXX OR DIE
+    my $sync_command = "$svn_up$current_rev";
+    unless ($verbose) {
+        $sync_command .= " >" . File::Spec->devnull();
+    }
+    warn "$sync_command\n";
+    system("$sync_command");
+
+    my $base = File::Spec->catdir( $test_dir, $test_name );
+    $base .= "_" . $current_rev;
+
+    my $output_file = $base . ".out";
+    my $log_file    = $base . ".log";
+
+    # Execute the test script.
+    open( my ($cmd_fh), "-|", "$test_script 2>$log_file" )
+        or die "Can't exec test script: $!\n";
+
+    my $output_text;
+    while (<$cmd_fh>) {
+        $output_text .= $_;
+    }
+    close($cmd_fh)
+        or die "Error running test script: status=$?";
+
+    # Save the output from the test script.
+    open( my ($output_fh), ">", $output_file )
+        or die "can't write to $output_file\n";
+
+    print {$output_fh} $output_text;
+    close($output_fh);
+
+    # boostrap our comparisons...
+    if ( $current_rev == $low_rev ) {
+        $low_output = $output_text;
+        next;
+    }
+    elsif ( $current_rev == $high_rev ) {
+        $high_output = $output_text;
+        next;
+    }
+
+   # Now, compare the output from that code to the high and the low outputs.
+   # Fixup $highest_low and $lowest_high based on this output. The assumption
+   # being that if the output is the same, it's the same for every intervening
+   # revision
+
+    my $output = $output_text;
+    if ( $output eq $low_output ) {
+        $highest_low = $current_rev;
+    }
+    elsif ( $output eq $high_output ) {
+        $lowest_high = $current_rev;
+    }
+    else {
+        die
+            "Checking $current_rev : output doesn't match high *OR* low so far\n";
+    }
+}

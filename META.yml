@@ -1,0 +1,9 @@
+--- #YAML:1.0
+name: App-SVNBinarySearch
+version: v0.1.0
+author:
+  - Will Coleda <coke@cpan.org>
+abstract: A container for functions in the svn_binary_search
+program
+license: perl
+generated_by: Module::Build version 0.2611, without YAML.pm

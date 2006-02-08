@@ -1,0 +1,24 @@
+App-SVNBinarySearch version 0.01
+
+svn_binary_search is a tool for determining which revision of a checked
+out svn repository changed a particular feature/introduced a bug.
+
+INSTALLATION
+
+    perl Build.PL
+    ./Build
+    ./Build test
+    ./Build install
+
+
+DEPENDENCIES
+
+Iterator.pm
+
+
+COPYRIGHT AND LICENCE
+
+Copyright (C) 2006, Will Coleda
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
